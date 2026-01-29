@@ -6,13 +6,17 @@ use crate::provider::Provider;
 use crate::telemetry::SseTelemetry;
 use crate::telemetry::run_with_request_telemetry;
 use codex_client::HttpTransport;
+use codex_client::Request;
 use codex_client::RequestTelemetry;
 use codex_client::StreamResponse;
 use http::HeaderMap;
 use http::Method;
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::debug;
 
 pub(crate) struct StreamingClient<T: HttpTransport, A: AuthProvider> {
     transport: T,
@@ -62,7 +66,9 @@ impl<T: HttpTransport, A: AuthProvider> StreamingClient<T, A> {
                 http::HeaderValue::from_static("text/event-stream"),
             );
             req.body = Some(body.clone());
-            add_auth_headers(&self.auth, req)
+            let req = add_auth_headers(&self.auth, req);
+            log_request(&req);
+            req
         };
 
         let stream_response = run_with_request_telemetry(
@@ -79,4 +85,33 @@ impl<T: HttpTransport, A: AuthProvider> StreamingClient<T, A> {
             self.sse_telemetry.clone(),
         ))
     }
+}
+
+fn log_request(req: &Request) {
+    if let Err(err) = append_request(req) {
+        debug!("failed to log HTTP request: {err}");
+    }
+}
+
+fn append_request(req: &Request) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("codex_prompt.log")?;
+
+    writeln!(file, "==== HTTP Request ====")?;
+    writeln!(file, "Method: {}", req.method)?;
+    writeln!(file, "URL: {}", req.url)?;
+    writeln!(file, "Headers:")?;
+    for (name, value) in &req.headers {
+        writeln!(file, "{}: {}", name, value.to_str().unwrap_or("<non-utf8>"))?;
+    }
+    let body = req.body.as_ref().map_or_else(
+        || "None".to_string(),
+        |body| serde_json::to_string(body).unwrap_or_else(|err| format!("invalid JSON: {err}")),
+    );
+    writeln!(file, "Body: {body}")?;
+    writeln!(file)?;
+    file.flush()?;
+    Ok(())
 }
